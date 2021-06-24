@@ -44,6 +44,12 @@ def print_time(s_duration):
 
 # CUDA_VISIBLE_DEVICES=0 python train_continuous.py --mname test00 --batch_size 8 --train_len 1000 --N_iter 50000 --hidden_size 512
 # 1000 iterationns ~ 3"30
+# init grads
+# tot_loss                      = 1050626629.0827637
+# loss_f0_frame                 = 980324806.5183105
+# loss_f0_articulation          = 63953576.20251465
+# loss_loudness_frame           = 7256.245791107416
+# loss_loudness_articulation    = 2375.3300167480484
 
 # TODO: check warning asking to apply flatten_parameters() on RNN (which ? ddsp's ?)
 
@@ -63,7 +69,7 @@ parser.add_argument('--train_len',    type=int,   default=1000)
 parser.add_argument('--N_iter',    type=int,   default=50000)
 parser.add_argument('--lr',    type=float,   default=0.0001)
 parser.add_argument('--f0_weight',    type=float,   default=10.)
-parser.add_argument('--export_step',    type=int,   default=1000)
+parser.add_argument('--export_step',    type=int,   default=5000)
 parser.add_argument('--test_percent',    type=float,   default=0.2)
 # model setting
 parser.add_argument('--articulation_percent',    type=float,   default=0.1)
@@ -171,13 +177,16 @@ for __i in range(1,args.N_iter+1):
         export_minibatch(model,device,mb_input,mb_target,export_dir+"train_",sample_rate=16000)
         mb_input,mb_target = sample_minibatch(test_data,args.batch_size,args.train_len,device)
         export_minibatch(model,device,mb_input,mb_target,export_dir+"test_",sample_rate=16000)
+        
         plot_losses(train_losses,step_losses,export_dir+"train_")
         plot_losses(test_losses,step_losses,export_dir+"test_")
+        np.save(export_dir+"train_losses.npy",train_losses)
+        np.save(export_dir+"test_losses.npy",test_losses)
 
 
 
 ###############################################################################
-## happy ending
+## happy ending ?
 
 torch.save(model.state_dict(), mpath+args.mname+".pt")
 mb_input,mb_target = sample_minibatch(train_data,args.batch_size,args.train_len,device)
@@ -191,6 +200,7 @@ plot_losses(test_losses,step_losses,export_dir+"test_")
 mb_input,mb_target = sample_minibatch(train_data,args.batch_size,args.train_len,device)
 gradient_check(model,optimizer,mb_input,mb_target)
 
-
+np.save(export_dir+"train_losses.npy",train_losses)
+np.save(export_dir+"test_losses.npy",test_losses)
 
 

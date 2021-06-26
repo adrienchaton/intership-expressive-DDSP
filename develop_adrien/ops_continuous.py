@@ -16,6 +16,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pickle
 import soundfile as sf
+from sklearn.preprocessing import MinMaxScaler, QuantileTransformer
 
 import torch
 import torch.nn as nn
@@ -74,7 +75,7 @@ def split_data(data,train_len,test_percent = 0.2):
     return train_data,test_data
 
 
-def load_and_pp_data(file, train_len, articulation_percent = 0.1, test_percent = 0.2):
+def load_and_pp_data(file, train_len, articulation_percent = 0.1, test_percent = 0.2, scaler = "none"):
     with (open(file, "rb")) as openfile:
         data = pickle.load(openfile)
     u_f0_segment = segment_midi_input(data, articulation_percent = articulation_percent)
@@ -83,8 +84,37 @@ def load_and_pp_data(file, train_len, articulation_percent = 0.1, test_percent =
     data["raw_f0"] = raw_f0
     f0_range = [np.min(raw_f0),np.max(raw_f0)]
     loudness_range = [np.min(data["e_loudness"]),np.max(data["e_loudness"])]
+    if scaler=="none":
+        scalers = None
+    # compute scalers for u_f0,u_loudness,raw_f0,e_loudness
+    # preprocess all dataset and apply inverse tranform when exporting --> losses are computed in the scaled range
+    elif scaler=="quantile":
+        scaler_u_f0 = QuantileTransformer(n_quantiles=64,output_distribution='uniform')
+        data["u_f0"] = scaler_u_f0.fit_transform(data["u_f0"].reshape(-1, 1)).reshape(-1)
+        scaler_u_loudness = QuantileTransformer(n_quantiles=64,output_distribution='uniform')
+        data["u_loudness"] = scaler_u_loudness.fit_transform(data["u_loudness"].reshape(-1, 1)).reshape(-1)
+        scaler_raw_f0 = QuantileTransformer(n_quantiles=64,output_distribution='uniform')
+        data["raw_f0"] = scaler_raw_f0.fit_transform(data["raw_f0"].reshape(-1, 1)).reshape(-1)
+        scaler_e_loudness = QuantileTransformer(n_quantiles=64,output_distribution='uniform')
+        data["e_loudness"] = scaler_e_loudness.fit_transform(data["e_loudness"].reshape(-1, 1)).reshape(-1)
+        scalers = {"scaler_u_f0":scaler_u_f0,"scaler_u_loudness":scaler_u_loudness,
+                   "scaler_raw_f0":scaler_raw_f0,"scaler_e_loudness":scaler_e_loudness}
+    elif scaler=="minmax":
+        scaler_u_f0 = MinMaxScaler()
+        data["u_f0"] = scaler_u_f0.fit_transform(data["u_f0"].reshape(-1, 1)).reshape(-1)
+        scaler_u_loudness = MinMaxScaler()
+        data["u_loudness"] = scaler_u_loudness.fit_transform(data["u_loudness"].reshape(-1, 1)).reshape(-1)
+        scaler_raw_f0 = MinMaxScaler()
+        data["raw_f0"] = scaler_raw_f0.fit_transform(data["raw_f0"].reshape(-1, 1)).reshape(-1)
+        scaler_e_loudness = MinMaxScaler()
+        data["e_loudness"] = scaler_e_loudness.fit_transform(data["e_loudness"].reshape(-1, 1)).reshape(-1)
+        scalers = {"scaler_u_f0":scaler_u_f0,"scaler_u_loudness":scaler_u_loudness,
+                   "scaler_raw_f0":scaler_raw_f0,"scaler_e_loudness":scaler_e_loudness}
+    else:
+        print("invalid scaler argument")
+    
     train_data,test_data = split_data(data,train_len,test_percent=test_percent)
-    return train_data,test_data,f0_range,loudness_range
+    return train_data,test_data,f0_range,loudness_range,scalers
 
 
 def sample_minibatch(data,batch_size,train_len,device):
@@ -108,7 +138,7 @@ def sample_minibatch(data,batch_size,train_len,device):
     return mb_input,mb_target
 
 
-def export_minibatch(model,device,mb_input,mb_target,path,sample_rate=16000):
+def generate_minibatch(model,device,mb_input,mb_target,path,sample_rate=16000):
     batch_size = mb_input.shape[0]
     for i in range(batch_size):
         with torch.no_grad():
@@ -118,13 +148,27 @@ def export_minibatch(model,device,mb_input,mb_target,path,sample_rate=16000):
             init_f0 = mb_input[i,0,2]
             init_loudness = mb_input[i,0,3]
             output_f0,output_loudness = model.generation_loop(u_f0,u_loudness,u_f0_segment,device,init_f0=init_f0,init_loudness=init_loudness)
+            
+            raw_f0 = mb_target[i,:,:1]
+            e_loudness = mb_target[i,:,1:2]
+            
+            if model.scalers is not None:
+                u_f0 = torch.from_numpy(model.scalers["scaler_u_f0"].inverse_transform(u_f0.cpu().numpy())).float().to(device)
+                u_loudness = torch.from_numpy(model.scalers["scaler_u_loudness"].inverse_transform(u_loudness.cpu().numpy())).float().to(device)
+                output_f0 = torch.from_numpy(model.scalers["scaler_raw_f0"].inverse_transform(output_f0.unsqueeze(-1).cpu().numpy())).squeeze(-1).float().to(device)
+                output_loudness = torch.from_numpy(model.scalers["scaler_e_loudness"].inverse_transform(output_loudness.unsqueeze(-1).cpu().numpy())).squeeze(-1).float().to(device)
+                
+                raw_f0 = torch.from_numpy(model.scalers["scaler_raw_f0"].inverse_transform(raw_f0.cpu().numpy())).float().to(device)
+                e_loudness = torch.from_numpy(model.scalers["scaler_e_loudness"].inverse_transform(e_loudness.cpu().numpy())).float().to(device)
+            
             output_audio = model.get_audio(output_f0, output_loudness)
-            target_audio = model.get_audio(mb_target[i,:,0], mb_target[i,:,1])
+            target_audio = model.get_audio(raw_f0.squeeze(-1), e_loudness.squeeze(-1))
         
-        sf.write(path+str(i)+"_output_audio.wav",output_audio.squeeze().cpu().numpy(),sample_rate)
-        sf.write(path+str(i)+"_target_audio.wav",target_audio.squeeze().cpu().numpy(),sample_rate)
+        sf.write(path+str(i)+"_gen_output_audio.wav",output_audio.squeeze().cpu().numpy(),sample_rate)
+        sf.write(path+str(i)+"_gen_target_audio.wav",target_audio.squeeze().cpu().numpy(),sample_rate)
         
         plt.figure(figsize=(12,8))
+        plt.suptitle("u_f0 / u_loudness / target f0 / output f0 / target loudness / output loudness")
         plt.subplot(6,1,1)
         plt.plot(u_f0.squeeze().cpu().numpy(),c="r")
         plt.plot(u_f0_segment.squeeze().cpu().numpy(),c="b")
@@ -133,18 +177,76 @@ def export_minibatch(model,device,mb_input,mb_target,path,sample_rate=16000):
         plt.plot(u_loudness.squeeze().cpu().numpy(),c="r")
         plt.xticks([])
         plt.subplot(6,1,3)
-        plt.plot(mb_target[i,:,0].cpu().numpy(),c="r")
+        plt.plot(raw_f0.squeeze(-1).cpu().numpy(),c="r")
         plt.xticks([])
         plt.subplot(6,1,4)
         plt.plot(output_f0.squeeze().cpu().numpy(),c="b")
         plt.xticks([])
         plt.subplot(6,1,5)
-        plt.plot(mb_target[i,:,1].cpu().numpy(),c="r")
+        plt.plot(e_loudness.squeeze(-1).cpu().numpy(),c="r")
         plt.xticks([])
         plt.subplot(6,1,6)
         plt.plot(output_loudness.squeeze().cpu().numpy(),c="b")
         # plt.xticks([])
-        plt.savefig(path+str(i)+"_controls.pdf")
+        plt.savefig(path+str(i)+"_gen_controls.pdf")
+        plt.close("all")
+
+
+def reconstruct_minibatch(model,device,mb_input,mb_target,path,sample_rate=16000):
+    with torch.no_grad():
+        prediction = model.forward(mb_input)
+        pred_f0_frame, pred_loudness_frame, pred_f0_articulation, pred_loudness_articulation = model.split_predictions(prediction)
+        u_f0_segment = mb_target[:,:,2]
+        output_f0 = torch.where(u_f0_segment==0,pred_f0_articulation,pred_f0_frame)
+        output_loudness = torch.where(u_f0_segment==0,pred_loudness_articulation,pred_loudness_frame)
+    
+    batch_size = mb_input.shape[0]
+    for i in range(batch_size):
+        u_f0 = mb_input[i,:,:1]
+        u_loudness = mb_input[i,:,1:2]
+        u_f0_segment = mb_target[i,:,2:]
+        
+        raw_f0 = mb_target[i,:,:1]
+        e_loudness = mb_target[i,:,1:2]
+        
+        if model.scalers is not None:
+            u_f0 = torch.from_numpy(model.scalers["scaler_u_f0"].inverse_transform(u_f0.cpu().numpy())).float().to(device)
+            u_loudness = torch.from_numpy(model.scalers["scaler_u_loudness"].inverse_transform(u_loudness.cpu().numpy())).float().to(device)
+            output_f0[i,:] = torch.from_numpy(model.scalers["scaler_raw_f0"].inverse_transform(output_f0[i,:].unsqueeze(-1).cpu().numpy())).squeeze(-1).float().to(device)
+            output_loudness[i,:] = torch.from_numpy(model.scalers["scaler_e_loudness"].inverse_transform(output_loudness[i,:].unsqueeze(-1).cpu().numpy())).squeeze(-1).float().to(device)
+            
+            raw_f0 = torch.from_numpy(model.scalers["scaler_raw_f0"].inverse_transform(raw_f0.cpu().numpy())).float().to(device)
+            e_loudness = torch.from_numpy(model.scalers["scaler_e_loudness"].inverse_transform(e_loudness.cpu().numpy())).float().to(device)
+        
+        with torch.no_grad():
+            output_audio = model.get_audio(output_f0[i,:], output_loudness[i,:])
+            target_audio = model.get_audio(raw_f0.squeeze(-1), e_loudness.squeeze(-1))
+        
+        sf.write(path+str(i)+"_rec_output_audio.wav",output_audio.squeeze().cpu().numpy(),sample_rate)
+        sf.write(path+str(i)+"_rec_target_audio.wav",target_audio.squeeze().cpu().numpy(),sample_rate)
+        
+        plt.figure(figsize=(12,8))
+        plt.suptitle("u_f0 / u_loudness / target f0 / output f0 / target loudness / output loudness")
+        plt.subplot(6,1,1)
+        plt.plot(u_f0.squeeze().cpu().numpy(),c="r")
+        plt.plot(u_f0_segment.squeeze().cpu().numpy(),c="b")
+        plt.xticks([])
+        plt.subplot(6,1,2)
+        plt.plot(u_loudness.squeeze().cpu().numpy(),c="r")
+        plt.xticks([])
+        plt.subplot(6,1,3)
+        plt.plot(raw_f0.squeeze(-1).cpu().numpy(),c="r")
+        plt.xticks([])
+        plt.subplot(6,1,4)
+        plt.plot(output_f0[i,:].cpu().numpy(),c="b")
+        plt.xticks([])
+        plt.subplot(6,1,5)
+        plt.plot(e_loudness.squeeze(-1).cpu().numpy(),c="r")
+        plt.xticks([])
+        plt.subplot(6,1,6)
+        plt.plot(output_loudness[i,:].cpu().numpy(),c="b")
+        # plt.xticks([])
+        plt.savefig(path+str(i)+"_rec_controls.pdf")
         plt.close("all")
 
 
@@ -276,19 +378,21 @@ class LinearBlock(nn.Module):
         return x
 
 class ModelContinuousPitch_FandA(nn.Module):
-    def __init__(self, in_size, hidden_size, f0_range, loudness_range, n_out=2, n_bins=64, f0_weight=10., ddsp_path="results/ddsp_debug_pretrained.ts"):#, scalers):
+    def __init__(self, in_size, hidden_size, f0_range, loudness_range, n_out=2, n_bins=64, f0_weight=10., ddsp_path="results/ddsp_debug_pretrained.ts",
+                 n_RNN=1, dp=0.):#, scalers):
         super().__init__()
         
         # for each network (Frame or Articulation)
         # in_size = 4 for u_f0,u_loudness,raw_f0,e_loudness
         # out_size = n_out*n_bins -> n_out=2 after weighted sum -> raw_f0,e_loudness
         
-        # f0 is tiled in log and loudness is tiled in linear
         self.n_bins = n_bins
-        f0_bins = np.logspace(np.log10(f0_range[0]),np.log10(f0_range[1]),num=n_bins,endpoint=True,base=10)
-        self.f0_bins = torch.nn.parameter.Parameter(torch.from_numpy(f0_bins).float(), requires_grad=False)
-        loudness_bins = np.linspace(loudness_range[0],loudness_range[1],num=n_bins,endpoint=True)
-        self.loudness_bins = torch.nn.parameter.Parameter(torch.from_numpy(loudness_bins).float(), requires_grad=False)
+        if self.n_bins>1:
+            # f0 is tiled in log and loudness is tiled in linear
+            f0_bins = np.logspace(np.log10(f0_range[0]),np.log10(f0_range[1]),num=n_bins,endpoint=True,base=10)
+            self.f0_bins = torch.nn.parameter.Parameter(torch.from_numpy(f0_bins).float(), requires_grad=False)
+            loudness_bins = np.linspace(loudness_range[0],loudness_range[1],num=n_bins,endpoint=True)
+            self.loudness_bins = torch.nn.parameter.Parameter(torch.from_numpy(loudness_bins).float(), requires_grad=False)
         
         self.f0_weight = f0_weight
         
@@ -299,50 +403,51 @@ class ModelContinuousPitch_FandA(nn.Module):
         
         
         ## frame modules
-        self.F_pre_lstm = nn.Sequential(
-            LinearBlock(in_size, hidden_size),
-            LinearBlock(hidden_size, hidden_size),
-        )
+        F_pre_lstm = [LinearBlock(in_size, hidden_size)]
+        if dp>0:
+            F_pre_lstm += [nn.Dropout(p=dp)]
+        F_pre_lstm += [LinearBlock(hidden_size, hidden_size)]
+        if dp>0:
+            F_pre_lstm += [nn.Dropout(p=dp)]
+        self.F_pre_lstm = nn.Sequential(*F_pre_lstm)
 
         self.F_lstm = nn.GRU(
             hidden_size,
             hidden_size,
-            num_layers=1,
+            num_layers=n_RNN,
+            dropout=dp,
             batch_first=True,
         )
-
-        self.F_post_lstm = nn.Sequential(
-            LinearBlock(hidden_size, hidden_size),
-            LinearBlock(
-                hidden_size,
-                n_out*n_bins,
-                norm=False,
-                act=False,
-            ),
-        )
+        
+        F_post_lstm = [LinearBlock(hidden_size, hidden_size)]
+        if dp>0:
+            F_post_lstm += [nn.Dropout(p=dp)]
+        F_post_lstm += [LinearBlock(hidden_size,n_out*n_bins,norm=False,act=False)]
+        self.F_post_lstm = nn.Sequential(*F_post_lstm)
+        
         
         ## articulation modules
-        self.A_pre_lstm = nn.Sequential(
-            LinearBlock(in_size, hidden_size),
-            LinearBlock(hidden_size, hidden_size),
-        )
+        A_pre_lstm = [LinearBlock(in_size, hidden_size)]
+        if dp>0:
+            A_pre_lstm += [nn.Dropout(p=dp)]
+        A_pre_lstm += [LinearBlock(hidden_size, hidden_size)]
+        if dp>0:
+            A_pre_lstm += [nn.Dropout(p=dp)]
+        self.A_pre_lstm = nn.Sequential(*A_pre_lstm)
 
         self.A_lstm = nn.GRU(
             hidden_size,
             hidden_size,
-            num_layers=1,
+            num_layers=n_RNN,
+            dropout=dp,
             batch_first=True,
         )
-
-        self.A_post_lstm = nn.Sequential(
-            LinearBlock(hidden_size, hidden_size),
-            LinearBlock(
-                hidden_size,
-                n_out*n_bins,
-                norm=False,
-                act=False,
-            ),
-        )
+        
+        A_post_lstm = [LinearBlock(hidden_size, hidden_size)]
+        if dp>0:
+            A_post_lstm += [nn.Dropout(p=dp)]
+        A_post_lstm += [LinearBlock(hidden_size,n_out*n_bins,norm=False,act=False)]
+        self.A_post_lstm = nn.Sequential(*A_post_lstm)
 
     # def configure_optimizers(self):
     #     return torch.optim.Adam(
@@ -362,9 +467,16 @@ class ModelContinuousPitch_FandA(nn.Module):
         F_out = self.F_pre_lstm(x_in)
         F_out = self.F_lstm(F_out)[0]
         F_out = self.F_post_lstm(F_out)
-        # weighted sum of bins
-        pred_f0_frame = torch.sum(F.softmax(F_out[:,:,:self.n_bins],-1)*self.f0_bins.unsqueeze(0).unsqueeze(0).repeat(batch_size,frame_size,1),2)
-        pred_loudness_frame = torch.sum(F.softmax(F_out[:,:,self.n_bins:],-1)*self.loudness_bins.unsqueeze(0).unsqueeze(0).repeat(batch_size,frame_size,1),2)
+        if self.n_bins>1:
+            # weighted sum of bins
+            pred_f0_frame = torch.sum(F.softmax(F_out[:,:,:self.n_bins],-1)*self.f0_bins.unsqueeze(0).unsqueeze(0).repeat(batch_size,frame_size,1),2)
+            pred_loudness_frame = torch.sum(F.softmax(F_out[:,:,self.n_bins:],-1)*self.loudness_bins.unsqueeze(0).unsqueeze(0).repeat(batch_size,frame_size,1),2)
+        else:
+            pred_f0_frame = F_out[:,:,0]
+            pred_loudness_frame = F_out[:,:,1]
+            if self.scalers is not None:
+                pred_f0_frame = F.sigmoid(pred_f0_frame)
+                pred_loudness_frame = F.sigmoid(pred_loudness_frame)
         
         # replace pred_f0_frame into ground-truth f0 and pred_loudness_frame into ground-truth loudness
         # ground-truth is one step behind predictions -> ground-truth[1:] and predictions[:-1]
@@ -375,9 +487,16 @@ class ModelContinuousPitch_FandA(nn.Module):
         A_out = self.A_pre_lstm(x_in)
         A_out = self.A_lstm(A_out)[0]
         A_out = self.A_post_lstm(A_out)
-        # weighted sum of bins
-        pred_f0_articulation = torch.sum(F.softmax(A_out[:,:,:self.n_bins],-1)*self.f0_bins.unsqueeze(0).unsqueeze(0).repeat(batch_size,frame_size,1),2)
-        pred_loudness_articulation = torch.sum(F.softmax(A_out[:,:,self.n_bins:],-1)*self.loudness_bins.unsqueeze(0).unsqueeze(0).repeat(batch_size,frame_size,1),2)
+        if self.n_bins>1:
+            # weighted sum of bins
+            pred_f0_articulation = torch.sum(F.softmax(A_out[:,:,:self.n_bins],-1)*self.f0_bins.unsqueeze(0).unsqueeze(0).repeat(batch_size,frame_size,1),2)
+            pred_loudness_articulation = torch.sum(F.softmax(A_out[:,:,self.n_bins:],-1)*self.loudness_bins.unsqueeze(0).unsqueeze(0).repeat(batch_size,frame_size,1),2)
+        else:
+            pred_f0_articulation = A_out[:,:,0]
+            pred_loudness_articulation = A_out[:,:,1]
+            if self.scalers is not None:
+                pred_f0_articulation = F.sigmoid(pred_f0_articulation)
+                pred_loudness_articulation = F.sigmoid(pred_loudness_articulation)
         
         prediction = torch.stack([pred_f0_frame,pred_loudness_frame,pred_f0_articulation,pred_loudness_articulation],-1)
         return prediction
@@ -453,21 +572,38 @@ class ModelContinuousPitch_FandA(nn.Module):
             
             # forward frame network
             F_out = self.F_pre_lstm(x_in)
-            F_out,F_context = self.F_lstm(F_out)
+            F_out,F_context = self.F_lstm(F_out,F_context)
             F_out = self.F_post_lstm(F_out)
             
-            # forward articulation network conditioned on frame prediction
+            # forward articulation network
             A_out = self.A_pre_lstm(x_in)
-            A_out,A_context = self.A_lstm(A_out)
+            A_out,A_context = self.A_lstm(A_out,A_context)
             A_out = self.A_post_lstm(A_out)
             
-            # weighted sum of bins
+            # select either frame or articulation prediction
             if u_f0_segment[0,i]!=0:
-                pred_f0 = torch.sum(F.softmax(F_out[:,:,:self.n_bins],-1)*self.f0_bins.unsqueeze(0).unsqueeze(0),2)
-                pred_loudness = torch.sum(F.softmax(F_out[:,:,self.n_bins:],-1)*self.loudness_bins.unsqueeze(0).unsqueeze(0),2)
+                if self.n_bins>1:
+                    # weighted sum of bins
+                    pred_f0 = torch.sum(F.softmax(F_out[:,:,:self.n_bins],-1)*self.f0_bins.unsqueeze(0).unsqueeze(0),2)
+                    pred_loudness = torch.sum(F.softmax(F_out[:,:,self.n_bins:],-1)*self.loudness_bins.unsqueeze(0).unsqueeze(0),2)
+                else:
+                    pred_f0 = F_out[:,:,0]
+                    pred_loudness = F_out[:,:,1]
+                    if self.scalers is not None:
+                        pred_f0 = F.sigmoid(pred_f0)
+                        pred_loudness = F.sigmoid(pred_loudness)
             else:
-                pred_f0 = torch.sum(F.softmax(A_out[:,:,:self.n_bins],-1)*self.f0_bins.unsqueeze(0).unsqueeze(0),2)
-                pred_loudness = torch.sum(F.softmax(A_out[:,:,self.n_bins:],-1)*self.loudness_bins.unsqueeze(0).unsqueeze(0),2)
+                if self.n_bins>1:
+                    # weighted sum of bins
+                    pred_f0 = torch.sum(F.softmax(A_out[:,:,:self.n_bins],-1)*self.f0_bins.unsqueeze(0).unsqueeze(0),2)
+                    pred_loudness = torch.sum(F.softmax(A_out[:,:,self.n_bins:],-1)*self.loudness_bins.unsqueeze(0).unsqueeze(0),2)
+                else:
+                    pred_f0 = A_out[:,:,0]
+                    pred_loudness = A_out[:,:,1]
+                    if self.scalers is not None:
+                        pred_f0 = F.sigmoid(pred_f0)
+                        pred_loudness = F.sigmoid(pred_loudness)
+            
             x[:, i + 1:i + 2, 2] = pred_f0
             x[:, i + 1:i + 2, 3] = pred_loudness
 

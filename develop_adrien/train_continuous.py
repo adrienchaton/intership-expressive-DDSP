@@ -26,7 +26,7 @@ import argparse
 
 from newLSTMpreprocess import pctof,mtof
 
-from ops_continuous import load_and_pp_data,sample_minibatch,export_minibatch,plot_losses,gradient_check,ModelContinuousPitch_FandA
+from ops_continuous import load_and_pp_data,sample_minibatch,generate_minibatch,reconstruct_minibatch,plot_losses,gradient_check,ModelContinuousPitch_FandA
 
 
 
@@ -41,15 +41,6 @@ def print_time(s_duration):
 ## settings
 
 # default DDSP setting is frame_rate=100 and sample_rate=16000
-
-# CUDA_VISIBLE_DEVICES=0 python train_continuous.py --mname test00 --batch_size 8 --train_len 1000 --N_iter 50000 --hidden_size 512
-# 1000 iterationns ~ 3"30
-# init grads
-# tot_loss                      = 1050626629.0827637
-# loss_f0_frame                 = 980324806.5183105
-# loss_f0_articulation          = 63953576.20251465
-# loss_loudness_frame           = 7256.245791107416
-# loss_loudness_articulation    = 2375.3300167480484
 
 # TODO: check warning asking to apply flatten_parameters() on RNN (which ? ddsp's ?)
 
@@ -75,6 +66,9 @@ parser.add_argument('--test_percent',    type=float,   default=0.2)
 parser.add_argument('--articulation_percent',    type=float,   default=0.1)
 parser.add_argument('--hidden_size',    type=int,   default=256)
 parser.add_argument('--out_n_bins',    type=int,   default=64)
+parser.add_argument('--scaler',    type=str,   default="none") # "none" n_bins>1 or "none"/"quantile"/"minmax" if n_bins==1
+parser.add_argument('--n_RNN',    type=int,   default=1)
+parser.add_argument('--dp',    type=float,   default=0.)
 args = parser.parse_args()
 print(args)
 
@@ -83,14 +77,21 @@ print(args)
 ###############################################################################
 ## initialisation
 
-train_data,test_data,f0_range,loudness_range = load_and_pp_data(args.data_dir,args.train_len,articulation_percent=args.articulation_percent,test_percent=args.test_percent)
+if args.out_n_bins>1:
+    args.scaler = "none"
+
+train_data,test_data,f0_range,loudness_range,scalers = load_and_pp_data(args.data_dir,args.train_len,articulation_percent=args.articulation_percent,test_percent=args.test_percent,scaler=args.scaler)         
 
 # hard-coded
 input_size = 4
 out_size = 2
-model = ModelContinuousPitch_FandA(input_size, args.hidden_size, f0_range, loudness_range, n_out=out_size, n_bins=args.out_n_bins, f0_weight=args.f0_weight, ddsp_path=args.ddsp_path)
+model = ModelContinuousPitch_FandA(input_size, args.hidden_size, f0_range, loudness_range, n_out=out_size, n_bins=args.out_n_bins, f0_weight=args.f0_weight, ddsp_path=args.ddsp_path, n_RNN=args.n_RNN, dp=args.dp)  
 model.train()
 model.to(device)
+
+# if scalers is not None:
+    # TODO: save scalers
+model.scalers = scalers
 
 optimizer = torch.optim.Adam(model.parameters(),lr=args.lr)
 
@@ -174,9 +175,12 @@ for __i in range(1,args.N_iter+1):
     if __i%args.export_step==0:
         print("intermediate plots and exports")
         mb_input,mb_target = sample_minibatch(train_data,args.batch_size,args.train_len,device)
-        export_minibatch(model,device,mb_input,mb_target,export_dir+"train_",sample_rate=16000)
+        generate_minibatch(model,device,mb_input,mb_target,export_dir+"train_",sample_rate=16000)
+        reconstruct_minibatch(model,device,mb_input,mb_target,export_dir+"train_",sample_rate=16000)
+        
         mb_input,mb_target = sample_minibatch(test_data,args.batch_size,args.train_len,device)
-        export_minibatch(model,device,mb_input,mb_target,export_dir+"test_",sample_rate=16000)
+        generate_minibatch(model,device,mb_input,mb_target,export_dir+"test_",sample_rate=16000)
+        reconstruct_minibatch(model,device,mb_input,mb_target,export_dir+"test_",sample_rate=16000)
         
         plot_losses(train_losses,step_losses,export_dir+"train_")
         plot_losses(test_losses,step_losses,export_dir+"test_")
@@ -189,18 +193,22 @@ for __i in range(1,args.N_iter+1):
 ## happy ending ?
 
 torch.save(model.state_dict(), mpath+args.mname+".pt")
+
 mb_input,mb_target = sample_minibatch(train_data,args.batch_size,args.train_len,device)
-export_minibatch(model,device,mb_input,mb_target,export_dir+"train_",sample_rate=16000)
+generate_minibatch(model,device,mb_input,mb_target,export_dir+"train_",sample_rate=16000)
+reconstruct_minibatch(model,device,mb_input,mb_target,export_dir+"train_",sample_rate=16000)
+
 mb_input,mb_target = sample_minibatch(test_data,args.batch_size,args.train_len,device)
-export_minibatch(model,device,mb_input,mb_target,export_dir+"test_",sample_rate=16000)
+generate_minibatch(model,device,mb_input,mb_target,export_dir+"test_",sample_rate=16000)
+reconstruct_minibatch(model,device,mb_input,mb_target,export_dir+"test_",sample_rate=16000)
+
 plot_losses(train_losses,step_losses,export_dir+"train_")
 plot_losses(test_losses,step_losses,export_dir+"test_")
-
-
-mb_input,mb_target = sample_minibatch(train_data,args.batch_size,args.train_len,device)
-gradient_check(model,optimizer,mb_input,mb_target)
-
 np.save(export_dir+"train_losses.npy",train_losses)
 np.save(export_dir+"test_losses.npy",test_losses)
+
+model.train()
+mb_input,mb_target = sample_minibatch(train_data,args.batch_size,args.train_len,device)
+gradient_check(model,optimizer,mb_input,mb_target)
 
 

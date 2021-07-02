@@ -26,7 +26,7 @@ import argparse
 
 from newLSTMpreprocess import pctof,mtof
 
-from ops_continuous import load_and_pp_data,sample_minibatch,generate_minibatch,reconstruct_minibatch,plot_losses,gradient_check,ModelContinuousPitch_FandA
+from ops_continuous import load_and_pp_data,sample_minibatch,generate_minibatch,reconstruct_minibatch,plot_losses,gradient_check,ModelContinuousPitch_FandA_AR,ModelContinuousPitch_FandA_FF
 
 
 
@@ -63,12 +63,14 @@ parser.add_argument('--f0_weight',    type=float,   default=10.)
 parser.add_argument('--export_step',    type=int,   default=5000)
 parser.add_argument('--test_percent',    type=float,   default=0.2)
 # model setting
+parser.add_argument('--model_prediction',    type=str,   default="AR")
 parser.add_argument('--articulation_percent',    type=float,   default=0.1)
 parser.add_argument('--hidden_size',    type=int,   default=256)
 parser.add_argument('--out_n_bins',    type=int,   default=64)
 parser.add_argument('--scaler',    type=str,   default="none") # "none" n_bins>1 or "none"/"quantile"/"minmax" if n_bins==1
 parser.add_argument('--n_RNN',    type=int,   default=1)
 parser.add_argument('--dp',    type=float,   default=0.)
+parser.add_argument('--n_dir',    type=int,   default=1) # 2 for bidirectional only for FF model
 args = parser.parse_args()
 print(args)
 
@@ -85,7 +87,12 @@ train_data,test_data,f0_range,loudness_range,scalers = load_and_pp_data(args.dat
 # hard-coded
 input_size = 4
 out_size = 2
-model = ModelContinuousPitch_FandA(input_size, args.hidden_size, f0_range, loudness_range, n_out=out_size, n_bins=args.out_n_bins, f0_weight=args.f0_weight, ddsp_path=args.ddsp_path, n_RNN=args.n_RNN, dp=args.dp)  
+if args.model_prediction=="AR":
+    model = ModelContinuousPitch_FandA_AR(input_size, args.hidden_size, f0_range, loudness_range, n_out=out_size,
+                            n_bins=args.out_n_bins, f0_weight=args.f0_weight, ddsp_path=args.ddsp_path, n_RNN=args.n_RNN, dp=args.dp)  
+if args.model_prediction=="FF":
+    model = ModelContinuousPitch_FandA_FF(input_size, args.hidden_size, f0_range, loudness_range, n_out=out_size,
+                            n_bins=args.out_n_bins, f0_weight=args.f0_weight, ddsp_path=args.ddsp_path, n_dir=args.n_dir, n_RNN=args.n_RNN, dp=args.dp) 
 model.train()
 model.to(device)
 
@@ -107,7 +114,7 @@ dict_args["loudness_range"] = loudness_range
 np.save(os.path.join(mpath,args.mname+'_args.npy'),dict_args)
 
 
-mb_input,mb_target = sample_minibatch(train_data,args.batch_size,args.train_len,device)
+mb_input,mb_target = sample_minibatch(train_data,args.batch_size,args.train_len,device,model_prediction=args.model_prediction)
 gradient_check(model,optimizer,mb_input,mb_target)
 
 
@@ -130,7 +137,7 @@ for __i in range(1,args.N_iter+1):
     
     # training step
     model.train()
-    mb_input,mb_target = sample_minibatch(train_data,args.batch_size,args.train_len,device)
+    mb_input,mb_target = sample_minibatch(train_data,args.batch_size,args.train_len,device,model_prediction=args.model_prediction)
     losses = model.forward_loss(mb_input,mb_target)
     loss_tot = sum(losses)
     model.zero_grad()
@@ -147,7 +154,7 @@ for __i in range(1,args.N_iter+1):
     # test step
     model.eval()
     with torch.no_grad():
-        mb_input,mb_target = sample_minibatch(test_data,args.batch_size,args.train_len,device)
+        mb_input,mb_target = sample_minibatch(test_data,args.batch_size,args.train_len,device,model_prediction=args.model_prediction)
         losses = model.forward_loss(mb_input,mb_target)
         loss_tot = sum(losses)
     test_losslog["loss_tot"] += loss_tot.item()
@@ -174,12 +181,12 @@ for __i in range(1,args.N_iter+1):
     
     if __i%args.export_step==0:
         print("intermediate plots and exports")
-        mb_input,mb_target = sample_minibatch(train_data,args.batch_size,args.train_len,device)
-        generate_minibatch(model,device,mb_input,mb_target,export_dir+"train_",sample_rate=16000)
+        mb_input,mb_target = sample_minibatch(train_data,args.batch_size,args.train_len,device,model_prediction=args.model_prediction)
+        generate_minibatch(model,device,mb_input,mb_target,export_dir+"train_",sample_rate=16000,model_prediction=args.model_prediction)
         reconstruct_minibatch(model,device,mb_input,mb_target,export_dir+"train_",sample_rate=16000)
         
-        mb_input,mb_target = sample_minibatch(test_data,args.batch_size,args.train_len,device)
-        generate_minibatch(model,device,mb_input,mb_target,export_dir+"test_",sample_rate=16000)
+        mb_input,mb_target = sample_minibatch(test_data,args.batch_size,args.train_len,device,model_prediction=args.model_prediction)
+        generate_minibatch(model,device,mb_input,mb_target,export_dir+"test_",sample_rate=16000,model_prediction=args.model_prediction)
         reconstruct_minibatch(model,device,mb_input,mb_target,export_dir+"test_",sample_rate=16000)
         
         plot_losses(train_losses,step_losses,export_dir+"train_")
@@ -194,12 +201,12 @@ for __i in range(1,args.N_iter+1):
 
 torch.save(model.state_dict(), mpath+args.mname+".pt")
 
-mb_input,mb_target = sample_minibatch(train_data,args.batch_size,args.train_len,device)
-generate_minibatch(model,device,mb_input,mb_target,export_dir+"train_",sample_rate=16000)
+mb_input,mb_target = sample_minibatch(train_data,args.batch_size,args.train_len,device,model_prediction=args.model_prediction)
+generate_minibatch(model,device,mb_input,mb_target,export_dir+"train_",sample_rate=16000,model_prediction=args.model_prediction)
 reconstruct_minibatch(model,device,mb_input,mb_target,export_dir+"train_",sample_rate=16000)
 
-mb_input,mb_target = sample_minibatch(test_data,args.batch_size,args.train_len,device)
-generate_minibatch(model,device,mb_input,mb_target,export_dir+"test_",sample_rate=16000)
+mb_input,mb_target = sample_minibatch(test_data,args.batch_size,args.train_len,device,model_prediction=args.model_prediction)
+generate_minibatch(model,device,mb_input,mb_target,export_dir+"test_",sample_rate=16000,model_prediction=args.model_prediction)
 reconstruct_minibatch(model,device,mb_input,mb_target,export_dir+"test_",sample_rate=16000)
 
 plot_losses(train_losses,step_losses,export_dir+"train_")
@@ -208,7 +215,7 @@ np.save(export_dir+"train_losses.npy",train_losses)
 np.save(export_dir+"test_losses.npy",test_losses)
 
 model.train()
-mb_input,mb_target = sample_minibatch(train_data,args.batch_size,args.train_len,device)
+mb_input,mb_target = sample_minibatch(train_data,args.batch_size,args.train_len,device,model_prediction=args.model_prediction)
 gradient_check(model,optimizer,mb_input,mb_target)
 
 

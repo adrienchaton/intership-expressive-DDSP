@@ -117,37 +117,57 @@ def load_and_pp_data(file, train_len, articulation_percent = 0.1, test_percent =
     return train_data,test_data,f0_range,loudness_range,scalers
 
 
-def sample_minibatch(data,batch_size,train_len,device):
+def sample_minibatch(data,batch_size,train_len,device,model_prediction="AR"):
+    # for AR model (auto-regressive)
     # input = u_f0,u_loudness + raw_f0[-1],e_loudness[-1] + u_f0_segment[-1]
     # target = raw_f0,e_loudness + u_f0_segment
+    
+    # for FF model (feed-forward)
+    # input = u_f0,u_loudness + u_f0_segment
+    # target = raw_f0,e_loudness
+    
     dataset_len = len(data["u_f0"])
     mb_input = []
     mb_target = []
     for i in range(batch_size):
         rand_start = np.random.choice(np.arange(1,dataset_len-train_len))
-        mb_input.append(np.stack([data["u_f0"][rand_start:rand_start+train_len],
-                                  data["u_loudness"][rand_start:rand_start+train_len],
-                                  data["raw_f0"][rand_start-1:rand_start+train_len-1],
-                                  data["e_loudness"][rand_start-1:rand_start+train_len-1],
-                                  data["u_f0_segment"][rand_start-1:rand_start+train_len-1]],-1))
-        mb_target.append(np.stack([data["raw_f0"][rand_start:rand_start+train_len],
-                                   data["e_loudness"][rand_start:rand_start+train_len],
-                                   data["u_f0_segment"][rand_start:rand_start+train_len]],-1))
+        
+        if model_prediction=="AR":
+            mb_input.append(np.stack([data["u_f0"][rand_start:rand_start+train_len],
+                                      data["u_loudness"][rand_start:rand_start+train_len],
+                                      data["raw_f0"][rand_start-1:rand_start+train_len-1],
+                                      data["e_loudness"][rand_start-1:rand_start+train_len-1],
+                                      data["u_f0_segment"][rand_start-1:rand_start+train_len-1]],-1))
+            mb_target.append(np.stack([data["raw_f0"][rand_start:rand_start+train_len],
+                                       data["e_loudness"][rand_start:rand_start+train_len],
+                                       data["u_f0_segment"][rand_start:rand_start+train_len]],-1))
+        
+        if model_prediction=="FF":
+            mb_input.append(np.stack([data["u_f0"][rand_start:rand_start+train_len],
+                                      data["u_loudness"][rand_start:rand_start+train_len],
+                                      data["u_f0_segment"][rand_start:rand_start+train_len]],-1))
+            mb_target.append(np.stack([data["raw_f0"][rand_start:rand_start+train_len],
+                                       data["e_loudness"][rand_start:rand_start+train_len],
+                                       data["u_f0_segment"][rand_start:rand_start+train_len]],-1))
+    
     mb_input = torch.from_numpy(np.stack(mb_input,0)).float().to(device)
     mb_target = torch.from_numpy(np.stack(mb_target,0)).float().to(device)
     return mb_input,mb_target
 
 
-def generate_minibatch(model,device,mb_input,mb_target,path,sample_rate=16000):
+def generate_minibatch(model,device,mb_input,mb_target,path,sample_rate=16000,model_prediction="AR"):
     batch_size = mb_input.shape[0]
     for i in range(batch_size):
         with torch.no_grad():
             u_f0 = mb_input[i,:,:1]
             u_loudness = mb_input[i,:,1:2]
             u_f0_segment = mb_target[i,:,2:]
-            init_f0 = mb_input[i,0,2]
-            init_loudness = mb_input[i,0,3]
-            output_f0,output_loudness = model.generation_loop(u_f0,u_loudness,u_f0_segment,device,init_f0=init_f0,init_loudness=init_loudness)
+            if model_prediction=="AR":
+                init_f0 = mb_input[i,0,2]
+                init_loudness = mb_input[i,0,3]
+                output_f0,output_loudness = model.generation_loop(u_f0,u_loudness,u_f0_segment,device,init_f0=init_f0,init_loudness=init_loudness)
+            if model_prediction=="FF":
+                output_f0,output_loudness = model.generation_loop(u_f0,u_loudness,u_f0_segment,device)
             
             raw_f0 = mb_target[i,:,:1]
             e_loudness = mb_target[i,:,1:2]
@@ -357,7 +377,10 @@ def gradient_check(model,optimizer,mb_input,mb_target):
 
 
 ##############################################################################
-## nn
+## auto-regressive model class
+
+## input of both Frame and Articulation networks is u_f0,u_loudness,raw_f0[-1],e_loudness[-1]
+## output of both Frame and Articulation networks is raw_f0,e_loudness
 
 # def exponential_sigmoid(x):
 #     return 2*F.sigmoid(x)**np.log(10)+1e-7
@@ -377,7 +400,7 @@ class LinearBlock(nn.Module):
             x = nn.functional.leaky_relu(x)
         return x
 
-class ModelContinuousPitch_FandA(nn.Module):
+class ModelContinuousPitch_FandA_AR(nn.Module):
     def __init__(self, in_size, hidden_size, f0_range, loudness_range, n_out=2, n_bins=64, f0_weight=10., ddsp_path="results/ddsp_debug_pretrained.ts",
                  n_RNN=1, dp=0.):#, scalers):
         super().__init__()
@@ -670,6 +693,214 @@ class ModelContinuousPitch_FandA(nn.Module):
     #             }, i)
 
 
+
+##############################################################################
+## feed-forward model class
+
+## input of Frame network is u_f0,u_loudness
+## input of Articulation network is u_f0,u_loudness + raw_f0,e_loudness (frame prediction)
+
+## output of both Frame and Articulation networks is raw_f0,e_loudness
+
+class ModelContinuousPitch_FandA_FF(nn.Module):
+    def __init__(self, in_size, hidden_size, f0_range, loudness_range, n_out=2, n_bins=64, f0_weight=10., ddsp_path="results/ddsp_debug_pretrained.ts",
+                 n_dir=1, n_RNN=1, dp=0.):#, scalers):
+        super().__init__()
+        
+        # for Frame network
+        # in_size//2 = 2 for u_f0,u_loudness
+        
+        # for Articulation network
+        # in_size = 4 for u_f0,u_loudness,raw_f0,e_loudness
+        
+        # out_size = n_out*n_bins -> n_out=2 after weighted sum -> raw_f0,e_loudness
+        
+        self.n_dir = n_dir
+        if n_dir==2:
+            bidirectional = True
+        else:
+            bidirectional = False
+        
+        self.f0_range = f0_range
+        self.loudness_range = loudness_range
+        
+        self.n_bins = n_bins
+        if self.n_bins>1:
+            # f0 is tiled in log and loudness is tiled in linear
+            f0_bins = np.logspace(np.log10(f0_range[0]),np.log10(f0_range[1]),num=n_bins,endpoint=True,base=10)
+            self.f0_bins = torch.nn.parameter.Parameter(torch.from_numpy(f0_bins).float(), requires_grad=False)
+            loudness_bins = np.linspace(loudness_range[0],loudness_range[1],num=n_bins,endpoint=True)
+            self.loudness_bins = torch.nn.parameter.Parameter(torch.from_numpy(loudness_bins).float(), requires_grad=False)
+        
+        self.f0_weight = f0_weight
+        
+        self.ddsp = torch.jit.load(ddsp_path).eval()
+        
+        
+        ## frame modules
+        F_pre_lstm = [LinearBlock(in_size//2, hidden_size)]
+        if dp>0:
+            F_pre_lstm += [nn.Dropout(p=dp)]
+        F_pre_lstm += [LinearBlock(hidden_size, hidden_size)]
+        if dp>0:
+            F_pre_lstm += [nn.Dropout(p=dp)]
+        self.F_pre_lstm = nn.Sequential(*F_pre_lstm)
+
+        self.F_lstm = nn.GRU(
+            hidden_size,
+            hidden_size,
+            num_layers=n_RNN,
+            dropout=dp,
+            batch_first=True,
+            bidirectional=bidirectional,
+        )
+        
+        if n_dir==2:
+            F_post_lstm = [LinearBlock(2*hidden_size, hidden_size)]
+        else:
+            F_post_lstm = [LinearBlock(hidden_size, hidden_size)]
+        if dp>0:
+            F_post_lstm += [nn.Dropout(p=dp)]
+        F_post_lstm += [LinearBlock(hidden_size,n_out*n_bins,norm=False,act=False)]
+        self.F_post_lstm = nn.Sequential(*F_post_lstm)
+        
+        
+        ## articulation modules
+        A_pre_lstm = [LinearBlock(in_size, hidden_size)]
+        if dp>0:
+            A_pre_lstm += [nn.Dropout(p=dp)]
+        A_pre_lstm += [LinearBlock(hidden_size, hidden_size)]
+        if dp>0:
+            A_pre_lstm += [nn.Dropout(p=dp)]
+        self.A_pre_lstm = nn.Sequential(*A_pre_lstm)
+
+        self.A_lstm = nn.GRU(
+            hidden_size,
+            hidden_size,
+            num_layers=n_RNN,
+            dropout=dp,
+            batch_first=True,
+            bidirectional=bidirectional,
+        )
+        
+        if n_dir==2:
+            A_post_lstm = [LinearBlock(2*hidden_size, hidden_size)]
+        else:
+            A_post_lstm = [LinearBlock(hidden_size, hidden_size)]
+        if dp>0:
+            A_post_lstm += [nn.Dropout(p=dp)]
+        A_post_lstm += [LinearBlock(hidden_size,n_out*n_bins,norm=False,act=False)]
+        self.A_post_lstm = nn.Sequential(*A_post_lstm)
+
+    def forward(self, x):
+        batch_size = x.shape[0]
+        frame_size = x.shape[1]
+        # x should be [batch,frames,3] == u_f0,u_loudness + u_f0_segment (aligned)
+        x_in = x[:,:,:-1]
+        u_f0_segment = x[:,:,-1]
+        
+        # forward frame network
+        F_out = self.F_pre_lstm(x_in)
+        F_out = self.F_lstm(F_out)[0]
+        F_out = self.F_post_lstm(F_out)
+        if self.n_bins>1:
+            # weighted sum of bins
+            pred_f0_frame = torch.sum(F.softmax(F_out[:,:,:self.n_bins],-1)*self.f0_bins.unsqueeze(0).unsqueeze(0).repeat(batch_size,frame_size,1),2)
+            pred_loudness_frame = torch.sum(F.softmax(F_out[:,:,self.n_bins:],-1)*self.loudness_bins.unsqueeze(0).unsqueeze(0).repeat(batch_size,frame_size,1),2)
+        else:
+            pred_f0_frame = F_out[:,:,0]
+            pred_loudness_frame = F_out[:,:,1]
+            if self.scalers is not None:
+                pred_f0_frame = F.sigmoid(pred_f0_frame)
+                pred_loudness_frame = F.sigmoid(pred_loudness_frame)
+        
+        # stack pred_f0_frame and pred_loudness_frame
+        if self.scalers is None:
+            x_frame = torch.stack([torch.where(u_f0_segment!=0,pred_f0_frame.detach(),torch.zeros_like(pred_f0_frame)+self.f0_range[0]),
+                                   torch.where(u_f0_segment!=0,pred_loudness_frame.detach(),torch.zeros_like(pred_loudness_frame)+self.loudness_range[0])],-1)
+        else:
+            # assume scaling in [0,1]
+            x_frame = torch.stack([torch.where(u_f0_segment!=0,pred_f0_frame.detach(),torch.zeros_like(pred_f0_frame)),
+                                   torch.where(u_f0_segment!=0,pred_loudness_frame.detach(),torch.zeros_like(pred_loudness_frame))],-1)
+        x_in = torch.cat([x_in,x_frame],-1)
+        
+        # forward articulation network conditioned on frame prediction
+        A_out = self.A_pre_lstm(x_in)
+        A_out = self.A_lstm(A_out)[0]
+        A_out = self.A_post_lstm(A_out)
+        if self.n_bins>1:
+            # weighted sum of bins
+            pred_f0_articulation = torch.sum(F.softmax(A_out[:,:,:self.n_bins],-1)*self.f0_bins.unsqueeze(0).unsqueeze(0).repeat(batch_size,frame_size,1),2)
+            pred_loudness_articulation = torch.sum(F.softmax(A_out[:,:,self.n_bins:],-1)*self.loudness_bins.unsqueeze(0).unsqueeze(0).repeat(batch_size,frame_size,1),2)
+        else:
+            pred_f0_articulation = A_out[:,:,0]
+            pred_loudness_articulation = A_out[:,:,1]
+            if self.scalers is not None:
+                pred_f0_articulation = F.sigmoid(pred_f0_articulation)
+                pred_loudness_articulation = F.sigmoid(pred_loudness_articulation)
+        
+        prediction = torch.stack([pred_f0_frame,pred_loudness_frame,pred_f0_articulation,pred_loudness_articulation],-1)
+        return prediction
+
+    def split_predictions(self, prediction):
+        pred_f0_frame, pred_loudness_frame, pred_f0_articulation, pred_loudness_articulation = torch.split(prediction, 1, -1)
+        return pred_f0_frame.squeeze(-1), pred_loudness_frame.squeeze(-1), pred_f0_articulation.squeeze(-1), pred_loudness_articulation.squeeze(-1)
+
+    def weighted_mse_loss(self, pred_f0_frame, pred_loudness_frame, pred_f0_articulation, pred_loudness_articulation,
+                   mb_target):
+        target_f0, target_loudness, u_f0_segment = torch.split(mb_target, 1, -1)
+        target_f0, target_loudness, u_f0_segment = target_f0.squeeze(-1), target_loudness.squeeze(-1), u_f0_segment.squeeze(-1)
+
+        loss_f0_frame = nn.functional.mse_loss(torch.where(u_f0_segment!=0,pred_f0_frame,torch.zeros_like(pred_f0_frame)),
+                                               torch.where(u_f0_segment!=0,target_f0,torch.zeros_like(pred_f0_frame)))*self.f0_weight
+        loss_f0_articulation = nn.functional.mse_loss(torch.where(u_f0_segment==0,pred_f0_articulation,torch.zeros_like(pred_f0_frame)),
+                                               torch.where(u_f0_segment==0,target_f0,torch.zeros_like(pred_f0_frame)))*self.f0_weight
+        
+        loss_loudness_frame = nn.functional.mse_loss(torch.where(u_f0_segment!=0,pred_loudness_frame,torch.zeros_like(pred_f0_frame)),
+                                               torch.where(u_f0_segment!=0,target_loudness,torch.zeros_like(pred_f0_frame)))
+        loss_loudness_articulation = nn.functional.mse_loss(torch.where(u_f0_segment==0,pred_loudness_articulation,torch.zeros_like(pred_f0_frame)),
+                                               torch.where(u_f0_segment==0,target_loudness,torch.zeros_like(pred_f0_frame)))
+        
+        return loss_f0_frame,loss_f0_articulation,loss_loudness_frame,loss_loudness_articulation
+
+    def forward_loss(self, mb_input,mb_target):
+        prediction = self.forward(mb_input)
+
+        pred_f0_frame, pred_loudness_frame, pred_f0_articulation, pred_loudness_articulation = self.split_predictions(prediction)
+        
+        loss_f0_frame,loss_f0_articulation,loss_loudness_frame,loss_loudness_articulation = self.weighted_mse_loss(pred_f0_frame,
+                                                    pred_loudness_frame, pred_f0_articulation, pred_loudness_articulation,mb_target)
+
+        return loss_f0_frame,loss_f0_articulation,loss_loudness_frame,loss_loudness_articulation
+
+    @torch.no_grad()
+    def generation_loop(self, u_f0,u_loudness,u_f0_segment,device):
+        if len(u_f0.shape)==2:
+            u_f0 = u_f0.unsqueeze(0)
+            u_loudness = u_loudness.unsqueeze(0)
+            u_f0_segment = u_f0_segment.unsqueeze(0)
+        batch_size = u_f0.shape[0]
+        assert batch_size==1, "generation loop should be run on an individual track"
+        
+        # u_f0,u_loudness,u_f0_segment should be aligned
+        x = torch.cat([u_f0,u_loudness,u_f0_segment],-1)
+        
+        prediction = self.forward(x)
+        pred_f0_frame, pred_loudness_frame, pred_f0_articulation, pred_loudness_articulation = self.split_predictions(prediction)
+        
+        output_f0 = torch.where(u_f0_segment[:,:,0]==0,pred_f0_articulation,pred_f0_frame)
+        output_loudness = torch.where(u_f0_segment[:,:,0]==0,pred_loudness_articulation,pred_loudness_frame)
+
+        return output_f0.squeeze(),output_loudness.squeeze()
+
+    def get_audio(self, f0, loudness):
+        if len(f0.shape)==1:
+            f0 = f0.unsqueeze(0).unsqueeze(-1)
+            loudness = loudness.unsqueeze(0).unsqueeze(-1)
+        y = self.ddsp(f0, loudness)
+        return y
+
+
 """
 ##############################################################################
 ## test
@@ -681,21 +912,29 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 file = '/Users/adrienbitton/Desktop/intership-expressive-DDSP/dataset/dataset.pickle'
 ddsp_path = '/Users/adrienbitton/Desktop/intership-expressive-DDSP/results/ddsp_debug_pretrained.ts'
 
-batch_size = 3
+batch_size = 2
 train_len = 1000
 
-train_data,test_data,f0_range,loudness_range = load_and_pp_data(file,train_len, articulation_percent = 0.1, test_percent = 0.2)
+model_prediction = "FF"
+
+train_data,test_data,f0_range,loudness_range,scalers = load_and_pp_data(file,train_len, articulation_percent = 0.1, test_percent = 0.2)
 
 N_features = len(train_data.keys())
 fnames = list(train_data.keys())
 
-model = ModelContinuousPitch_FandA(4, 128, f0_range, loudness_range, n_out=2, n_bins=64, f0_weight=10., ddsp_path=ddsp_path)
+if model_prediction=="AR":
+    model = ModelContinuousPitch_FandA_AR(4, 128, f0_range, loudness_range, n_out=2, n_bins=64, f0_weight=10., ddsp_path=ddsp_path, n_RNN=2, dp=0.)
+if model_prediction=="FF":
+    model = ModelContinuousPitch_FandA_FF(4, 128, f0_range, loudness_range, n_out=2, n_bins=64, f0_weight=10., ddsp_path=ddsp_path, n_dir=2, n_RNN=2, dp=0.)
+
 model.train()
 model.to(device)
 
+model.scalers = scalers
+
 optimizer = torch.optim.Adam(model.parameters(),lr=1e-4)
 
-mb_input,mb_target = sample_minibatch(train_data,batch_size,train_len,device)
+mb_input,mb_target = sample_minibatch(train_data,batch_size,train_len,device,model_prediction=model_prediction)
 
 ## checking gradient
 
@@ -703,7 +942,9 @@ gradient_check(model,optimizer,mb_input,mb_target)
 
 ## checking generation loop and audio synthesis
 
-export_minibatch(model,device,mb_input,mb_target,"./train_",sample_rate=16000)
+generate_minibatch(model,device,mb_input,mb_target,"./train_",sample_rate=16000,model_prediction=model_prediction)
+
+reconstruct_minibatch(model,device,mb_input,mb_target,"./train_",sample_rate=16000)
 """
 
 

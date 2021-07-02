@@ -25,7 +25,7 @@ import argparse
 
 from newLSTMpreprocess import pctof,mtof
 
-from ops_continuous import load_and_pp_data,sample_minibatch,generate_minibatch,reconstruct_minibatch,plot_losses,gradient_check,ModelContinuousPitch_FandA
+from ops_continuous import load_and_pp_data,sample_minibatch,generate_minibatch,reconstruct_minibatch,plot_losses,gradient_check,ModelContinuousPitch_FandA_AR,ModelContinuousPitch_FandA_FF
 
 
 
@@ -50,15 +50,26 @@ for mname in mnames:
     
     args["batch_size"] = 2
     
+    if "n_RNN" not in args.keys():
+        args["n_RNN"] = 1
+    if "dp" not in args.keys():
+        args["dp"] = 0.
+    if "model_prediction" not in args.keys():
+        args["model_prediction"] = "AR"
+    if "n_dir" not in args.keys():
+        args["n_dir"] = 1
+    
     train_data,test_data,f0_range,loudness_range,scalers = load_and_pp_data(data_dir,args["train_len"],articulation_percent=args["articulation_percent"],test_percent=args["test_percent"],scaler=args["scaler"])  
     
     # hard-coded
     input_size = 4
     out_size = 2
-    try:
-        model = ModelContinuousPitch_FandA(input_size, args["hidden_size"], f0_range, loudness_range, n_out=out_size, n_bins=args["out_n_bins"], f0_weight=args["f0_weight"], ddsp_path=ddsp_path, n_RNN=args["n_RNN"], dp=args["dp"])         
-    except:
-        model = ModelContinuousPitch_FandA(input_size, args["hidden_size"], f0_range, loudness_range, n_out=out_size, n_bins=args["out_n_bins"], f0_weight=args["f0_weight"], ddsp_path=ddsp_path)  
+    if args["model_prediction"]=="AR":
+        model = ModelContinuousPitch_FandA_AR(input_size, args["hidden_size"], f0_range, loudness_range, n_out=out_size,
+                                    n_bins=args["out_n_bins"], f0_weight=args["f0_weight"], ddsp_path=ddsp_path, n_RNN=args["n_RNN"], dp=args["dp"])         
+    if args["model_prediction"]=="FF":
+        model = ModelContinuousPitch_FandA_FF(input_size, args["hidden_size"], f0_range, loudness_range, n_out=out_size,
+                                    n_bins=args["out_n_bins"], f0_weight=args["f0_weight"], ddsp_path=ddsp_path, n_dir=args["n_dir"], n_RNN=args["n_RNN"], dp=args["dp"])  
     model.load_state_dict(torch.load(os.path.join(mpath,mname+'.pt'), map_location='cpu'))
     model.eval()
     model.to(device)
@@ -84,12 +95,12 @@ for mname in mnames:
     
     # export
     
-    mb_input,mb_target = sample_minibatch(train_data,args["batch_size"],args["train_len"],device)
-    generate_minibatch(model,device,mb_input,mb_target,export_dir+"train_",sample_rate=16000)
+    mb_input,mb_target = sample_minibatch(train_data,args["batch_size"],args["train_len"],device,model_prediction=args["model_prediction"])
+    generate_minibatch(model,device,mb_input,mb_target,export_dir+"train_",sample_rate=16000,model_prediction=args["model_prediction"])
     reconstruct_minibatch(model,device,mb_input,mb_target,export_dir+"train_",sample_rate=16000)
     
-    mb_input,mb_target = sample_minibatch(test_data,args["batch_size"],args["train_len"],device)
-    generate_minibatch(model,device,mb_input,mb_target,export_dir+"test_",sample_rate=16000)
+    mb_input,mb_target = sample_minibatch(test_data,args["batch_size"],args["train_len"],device,model_prediction=args["model_prediction"])
+    generate_minibatch(model,device,mb_input,mb_target,export_dir+"test_",sample_rate=16000,model_prediction=args["model_prediction"])
     reconstruct_minibatch(model,device,mb_input,mb_target,export_dir+"test_",sample_rate=16000)
 
 

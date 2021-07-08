@@ -58,6 +58,8 @@ for mname in mnames:
         args["model_prediction"] = "AR"
     if "n_dir" not in args.keys():
         args["n_dir"] = 1
+    if "pre_layers" not in args.keys():
+        args["pre_layers"] = "linear"
     
     train_data,test_data,f0_range,loudness_range,scalers = load_and_pp_data(data_dir,args["train_len"],articulation_percent=args["articulation_percent"],test_percent=args["test_percent"],scaler=args["scaler"])  
     
@@ -69,7 +71,7 @@ for mname in mnames:
                                     n_bins=args["out_n_bins"], f0_weight=args["f0_weight"], ddsp_path=ddsp_path, n_RNN=args["n_RNN"], dp=args["dp"])         
     if args["model_prediction"]=="FF":
         model = ModelContinuousPitch_FandA_FF(input_size, args["hidden_size"], f0_range, loudness_range, n_out=out_size,
-                                    n_bins=args["out_n_bins"], f0_weight=args["f0_weight"], ddsp_path=ddsp_path, n_dir=args["n_dir"], n_RNN=args["n_RNN"], dp=args["dp"])  
+                                    n_bins=args["out_n_bins"], f0_weight=args["f0_weight"], ddsp_path=ddsp_path, n_dir=args["n_dir"], n_RNN=args["n_RNN"], dp=args["dp"], pre_layers=args["pre_layers"])  
     model.load_state_dict(torch.load(os.path.join(mpath,mname+'.pt'), map_location='cpu'))
     model.eval()
     model.to(device)

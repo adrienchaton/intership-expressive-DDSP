@@ -71,6 +71,7 @@ parser.add_argument('--scaler',    type=str,   default="none") # "none" n_bins>1
 parser.add_argument('--n_RNN',    type=int,   default=1)
 parser.add_argument('--dp',    type=float,   default=0.)
 parser.add_argument('--n_dir',    type=int,   default=1) # 2 for bidirectional only for FF model
+parser.add_argument('--pre_layers',    type=str,   default="linear") # "linear" or "conv" only for FF model
 args = parser.parse_args()
 print(args)
 
@@ -92,7 +93,7 @@ if args.model_prediction=="AR":
                             n_bins=args.out_n_bins, f0_weight=args.f0_weight, ddsp_path=args.ddsp_path, n_RNN=args.n_RNN, dp=args.dp)  
 if args.model_prediction=="FF":
     model = ModelContinuousPitch_FandA_FF(input_size, args.hidden_size, f0_range, loudness_range, n_out=out_size,
-                            n_bins=args.out_n_bins, f0_weight=args.f0_weight, ddsp_path=args.ddsp_path, n_dir=args.n_dir, n_RNN=args.n_RNN, dp=args.dp) 
+                            n_bins=args.out_n_bins, f0_weight=args.f0_weight, ddsp_path=args.ddsp_path, n_dir=args.n_dir, n_RNN=args.n_RNN, dp=args.dp, pre_layers=args.pre_layers) 
 model.train()
 model.to(device)
 

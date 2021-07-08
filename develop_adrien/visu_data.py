@@ -41,23 +41,27 @@ x_range = 500
 
 
 # plot all features
-"""
+
 plt.figure()
 for i in range(N_features):
     plt.subplot(N_features+1,1,i+1)
     # plt.title(fnames[i],loc="right")
     plt.title(fnames[i],x=1.07,y=0.3)
-    plt.plot(data[fnames[i]][x_start:x_start+x_range])
+    if fnames[i]=="e_cents":
+        plt.plot(data[fnames[i]][x_start:x_start+x_range]-0.5)
+    else:
+        plt.plot(data[fnames[i]][x_start:x_start+x_range])
     plt.xticks([])
     plt.xlim((0, x_range)) 
 plt.subplot(N_features+1,1,i+2)
 # plt.title("e_f0+e_cents",loc="right")
-plt.title("pctof(e_f0,e_cents)",x=1.07,y=0.3)
-plt.plot(pctof(data["e_f0"][x_start:x_start+x_range],data["e_cents"][x_start:x_start+x_range]))
+plt.title("pctof(e_f0,e_cents-0.5)",x=1.07,y=0.3) # cf newLSTMpreprocess.py --> cents are shifted to [0,1] before saving the pickle dataset !!!
+plt.plot(pctof(data["e_f0"][x_start:x_start+x_range],data["e_cents"][x_start:x_start+x_range]-0.5))
 plt.xlim((0, x_range)) 
 # plt.tight_layout()
 plt.show()
-"""
+
+
 
 # plot expressive f0 and put color based on frame or articulation
 
@@ -96,13 +100,13 @@ cut_u_loud = int(min_u_loud-3)
 u_loudness_segment = data["u_loudness"].copy()
 u_loudness_segment[articulation_pos] = cut_u_loud
 
-f0_articulation = pctof(data["e_f0"],data["e_cents"]).copy()
-f0_frame = pctof(data["e_f0"],data["e_cents"]).copy()
+f0_articulation = pctof(data["e_f0"],data["e_cents"]-0.5).copy()
+f0_frame = pctof(data["e_f0"],data["e_cents"]-0.5).copy()
 f0_articulation[frame_pos] = 0
 f0_frame[articulation_pos] = 0
 
-cents_articulation = data["e_cents"].copy()
-cents_frame = data["e_cents"].copy()
+cents_articulation = data["e_cents"].copy()-0.5
+cents_frame = data["e_cents"].copy()-0.5
 cents_articulation[frame_pos] = -10
 cents_frame[articulation_pos] = -10
 
@@ -142,7 +146,7 @@ plt.title("f0",x=1.07,y=0.3)
 plt.plot(f0_frame,c="b")
 plt.plot(f0_articulation,c="r")
 plt.xlim((x_start, x_start+x_range))
-plt.ylim(np.min(pctof(data["e_f0"],data["e_cents"])[x_start:x_start+x_range])-100,np.max(pctof(data["e_f0"],data["e_cents"])[x_start:x_start+x_range])+100)
+plt.ylim(np.min(pctof(data["e_f0"],data["e_cents"]-0.5)[x_start:x_start+x_range])-100,np.max(pctof(data["e_f0"],data["e_cents"]-0.5)[x_start:x_start+x_range])+100)
 plt.xticks([])
 
 plt.subplot(6,1,5)
@@ -150,7 +154,7 @@ plt.title("cents",x=1.07,y=0.3)
 plt.plot(cents_frame,c="b")
 plt.plot(cents_articulation,c="r")
 plt.xlim((x_start, x_start+x_range))
-plt.ylim(-0.1,1.1)
+plt.ylim(-0.6,0.6)
 plt.xticks([])
 
 plt.subplot(6,1,6)

@@ -79,6 +79,9 @@ def load_and_pp_data(file, train_len, articulation_percent = 0.1, test_percent =
     with (open(file, "rb")) as openfile:
         data = pickle.load(openfile)
     u_f0_segment = segment_midi_input(data, articulation_percent = articulation_percent)
+    
+    data["e_cents"] -= 0.5 # cf newLSTMpreprocess.py --> cents are shifted to [0,1] before saving the pickle dataset !!!
+    
     raw_f0 = make_raw_f0(data)
     data["u_f0_segment"] = u_f0_segment
     data["raw_f0"] = raw_f0
@@ -702,9 +705,34 @@ class ModelContinuousPitch_FandA_AR(nn.Module):
 
 ## output of both Frame and Articulation networks is raw_f0,e_loudness
 
+class DilConv_BN_Block(nn.Module):
+    def __init__(self, in_size, out_size, dp=0., ker_size=3, n_conv=5):
+        super().__init__()
+        # in_size and out_size are channels
+        convs = []
+        for i in range(n_conv):
+            if i==0:
+                c_in = in_size
+            else:
+                c_in = out_size
+            convs += [nn.ReflectionPad1d(3**i),
+                      nn.Conv1d(c_in,out_size, kernel_size=ker_size, dilation=3**i),
+                      nn.BatchNorm1d(out_size),
+                      nn.LeakyReLU()]
+            if dp>0:
+                convs.append(nn.Dropout(p=dp))
+        self.convs = nn.Sequential(*convs)
+
+    def forward(self, x):
+        # assumes x of shape (N,L,C)
+        x = x.permute(0,2,1)
+        x = self.convs(x)
+        x = x.permute(0,2,1)
+        return x
+
 class ModelContinuousPitch_FandA_FF(nn.Module):
     def __init__(self, in_size, hidden_size, f0_range, loudness_range, n_out=2, n_bins=64, f0_weight=10., ddsp_path="results/ddsp_debug_pretrained.ts",
-                 n_dir=1, n_RNN=1, dp=0.):#, scalers):
+                 n_dir=1, n_RNN=1, dp=0., pre_layers="linear"):
         super().__init__()
         
         # for Frame network
@@ -738,13 +766,16 @@ class ModelContinuousPitch_FandA_FF(nn.Module):
         
         
         ## frame modules
-        F_pre_lstm = [LinearBlock(in_size//2, hidden_size)]
-        if dp>0:
-            F_pre_lstm += [nn.Dropout(p=dp)]
-        F_pre_lstm += [LinearBlock(hidden_size, hidden_size)]
-        if dp>0:
-            F_pre_lstm += [nn.Dropout(p=dp)]
-        self.F_pre_lstm = nn.Sequential(*F_pre_lstm)
+        if pre_layers=="linear":
+            F_pre_lstm = [LinearBlock(in_size//2, hidden_size)]
+            if dp>0:
+                F_pre_lstm += [nn.Dropout(p=dp)]
+            F_pre_lstm += [LinearBlock(hidden_size, hidden_size)]
+            if dp>0:
+                F_pre_lstm += [nn.Dropout(p=dp)]
+            self.F_pre_lstm = nn.Sequential(*F_pre_lstm)
+        if pre_layers=="conv":
+            self.F_pre_lstm = DilConv_BN_Block(in_size//2, hidden_size, dp=dp, ker_size=3, n_conv=5)
 
         self.F_lstm = nn.GRU(
             hidden_size,
@@ -766,13 +797,16 @@ class ModelContinuousPitch_FandA_FF(nn.Module):
         
         
         ## articulation modules
-        A_pre_lstm = [LinearBlock(in_size, hidden_size)]
-        if dp>0:
-            A_pre_lstm += [nn.Dropout(p=dp)]
-        A_pre_lstm += [LinearBlock(hidden_size, hidden_size)]
-        if dp>0:
-            A_pre_lstm += [nn.Dropout(p=dp)]
-        self.A_pre_lstm = nn.Sequential(*A_pre_lstm)
+        if pre_layers=="linear":
+            A_pre_lstm = [LinearBlock(in_size, hidden_size)]
+            if dp>0:
+                A_pre_lstm += [nn.Dropout(p=dp)]
+            A_pre_lstm += [LinearBlock(hidden_size, hidden_size)]
+            if dp>0:
+                A_pre_lstm += [nn.Dropout(p=dp)]
+            self.A_pre_lstm = nn.Sequential(*A_pre_lstm)
+        if pre_layers=="conv":
+            self.A_pre_lstm = DilConv_BN_Block(in_size, hidden_size, dp=dp, ker_size=3, n_conv=5)
 
         self.A_lstm = nn.GRU(
             hidden_size,
@@ -946,5 +980,8 @@ generate_minibatch(model,device,mb_input,mb_target,"./train_",sample_rate=16000,
 
 reconstruct_minibatch(model,device,mb_input,mb_target,"./train_",sample_rate=16000)
 """
+
+
+
 
 
